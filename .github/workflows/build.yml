@@ -1,0 +1,54 @@
+name: Build EXE
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  UPDATES_REPO: ${{ vars.UPDATES_REPO }}
+  UPDATES_TOKEN: ${{ secrets.UPDATES_REPO_TOKEN }}
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyinstaller pystray pillow
+      - name: Embed dashboard connection
+        shell: pwsh
+        env:
+          DASH_URL: ${{ vars.DASH_URL }}
+          DASH_INGEST_KEY: ${{ secrets.DASH_INGEST_KEY }}
+        run: |
+          if ($env:DASH_URL -and $env:DASH_INGEST_KEY) {
+            $c = Get-Content main.py -Raw -Encoding UTF8
+            $c = $c -replace '(?m)^EMBED_URL = ""', "EMBED_URL = `"$($env:DASH_URL)`""
+            $c = $c -replace '(?m)^EMBED_KEY = ""', "EMBED_KEY = `"$($env:DASH_INGEST_KEY)`""
+            [System.IO.File]::WriteAllText("$PWD/main.py", $c, (New-Object System.Text.UTF8Encoding($false)))
+          } else { Write-Host "DASH_URL / DASH_INGEST_KEY not set: skipping embed" }
+      - run: pyinstaller --onefile --noconsole --uac-admin --hidden-import pystray._win32 --name PCCleaner main.py
+      - name: Version and checksum
+        id: meta
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path main.py -Pattern '^VERSION = "([^"]+)"').Matches[0].Groups[1].Value
+          $h = (Get-FileHash dist/PCCleaner.exe -Algorithm SHA256).Hash.ToLower()
+          [System.IO.File]::WriteAllText("$PWD/dist/PCCleaner.exe.sha256", $h)
+          "version=$v" >> $env:GITHUB_OUTPUT
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PCCleaner
+          path: dist/PCCleaner.exe
+      - name: Publish to updates repo
+        if: ${{ env.UPDATES_REPO != '' && env.UPDATES_TOKEN != '' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $env:GH_TOKEN = $env:UPDATES_TOKEN
+          $tag = "v${{ steps.meta.outputs.version }}"
+          gh release delete $tag --repo $env:UPDATES_REPO --yes --cleanup-tag 2>$null
+          gh release create $tag dist/PCCleaner.exe dist/PCCleaner.exe.sha256 --repo $env:UPDATES_REPO --title "PCCleaner $tag" --notes "PCCleaner $tag"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
